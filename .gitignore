@@ -1,0 +1,4 @@
+modelos/
+_pycache__/
+.env
+notebooks/
