@@ -1,36 +1,117 @@
-import bcrypt
-from database import get_db_connection
+import torch
+import joblib
+import numpy as np
+import pandas as pd
+from transformers import BertTokenizer, BertModel
+from torch import nn
+from scipy.sparse import csr_matrix
+import re
+from scipy.sparse import csr_matrix, hstack
+import os
+import sys
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from src.feature_extractor import FeatureExtractor
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def create_users_table():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            email VARCHAR(100) UNIQUE NOT NULL,
-            password TEXT NOT NULL -- Guardamos el hash en lugar del password en texto plano
-        );
-    ''')
-    conn.commit()
-    cursor.close()
-    conn.close()
+class ClassificationModel(nn.Module):
+    def __init__(self, n_classes, bert_model_name):
+        super().__init__()
+        self.bert = BertModel.from_pretrained(bert_model_name)
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.4),
+            nn.Linear(768, 256),
+            nn.ReLU(),
+            nn.BatchNorm1d(256),
+            nn.Linear(256, n_classes)
+        )
+    
+    def forward(self, input_ids, attention_mask):
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        pooled_output = outputs.last_hidden_state[:, 0, :]
+        return self.classifier(pooled_output)
 
-def insert_user(username, email, password):
-    """Inserta un usuario en la base de datos con la contraseña encriptada."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+def cargar_modelos():
+    """Carga todos los modelos necesarios desde Secret Files en Render."""
+    
+    # ✅ CAMBIO 1: Cargar modelo BERT desde Secret Files
+    bert_model = ClassificationModel(n_classes=3, bert_model_name='dccuchile/bert-base-spanish-wwm-cased').to(DEVICE)
+    bert_model.load_state_dict(torch.load("/etc/secrets/best_classification_model.pth", map_location=DEVICE))  # ← Ruta actualizada para Render
 
-    # Encriptar la contraseña antes de guardarla
-    hashed_password = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    # ❌ Ruta anterior (solo para referencia)
+    # bert_model.load_state_dict(torch.load(
+    #     os.path.join(BASE_DIR, '..', 'modelos', 'bert_clasificacion_rf', 'best_classification_model.pth'),
+    #     map_location=DEVICE
+    # ))
 
-    cursor.execute('''
-        INSERT INTO users (username, email, password)
-        VALUES (%s, %s, %s);
-    ''', (username, email, hashed_password))
+    bert_model.eval()
+    
+    # ✅ CAMBIO 2: Cargar modelo Random Forest desde Secret Files
+    rf_model = joblib.load("/etc/secrets/rf_balanced.pkl")  # ← Ruta actualizada para Render
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+    # ❌ Ruta anterior (solo para referencia)
+    # rf_model = joblib.load(os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_distancia', 'rf_balanced.pkl'))
+
+    # ✅ CAMBIO 3: Cargar vectorizador TF-IDF desde Secret Files
+    vectorizer = joblib.load("/etc/secrets/tfidf_vectorizer.pkl")  # ← Ruta actualizada para Render
+
+    # ❌ Ruta anterior (solo para referencia)
+    # vectorizer = joblib.load(os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_distancia', 'tfidf_vectorizer.pkl'))
+
+    tokenizer = BertTokenizer.from_pretrained('dccuchile/bert-base-spanish-wwm-cased')
+    
+    return {
+        'bert_model': bert_model,
+        'rf_model': rf_model,
+        'vectorizer': vectorizer,
+        'tokenizer': tokenizer,
+        'expected_features': rf_model.n_features_in_
+    }
+
+def predecir_distancia(texto, modelos):
+    """Predice la distancia para una sola referencia de texto."""
+    textos = [texto] if isinstance(texto, str) else texto
+    
+    inputs = modelos['tokenizer'](
+        textos, 
+        return_tensors="pt",
+        truncation=True,
+        padding=True,
+        max_length=64
+    ).to(DEVICE)
+    
+    if 'token_type_ids' in inputs:
+        del inputs['token_type_ids']
+    
+    with torch.no_grad():
+        logits = modelos['bert_model'](**inputs)
+        probas = torch.softmax(logits, dim=1)
+    
+    grupos_idx = torch.argmax(logits, dim=1).cpu().numpy()
+    grupos = ['cercania_corta', 'cercania_inmediata', 'distancia_media']
+    
+    tfidf_features = modelos['vectorizer'].transform(textos)
+    
+    def extract_features(text):
+        text = str(text).lower()
+        return [
+            len(re.findall(r'(\d+)\s*cuadra', text)),
+            int('frente' in text),
+            int('metros' in text)
+        ]
+    
+    manual_features = np.array([extract_features(t) for t in textos])
+    
+    grupo_features = np.zeros((len(textos), 3))
+    for i, idx in enumerate(grupos_idx):
+        grupo_features[i, idx] = 1
+    
+    X = np.hstack([
+        tfidf_features.toarray()[:, :modelos['expected_features']-6],
+        grupo_features,
+        manual_features
+    ])
+    
+    preds = modelos['rf_model'].predict(X)
+    return float(preds[0])

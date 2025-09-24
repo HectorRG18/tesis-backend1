@@ -15,7 +15,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
 class ClassificationModel(nn.Module):
     def __init__(self, n_classes, bert_model_name):
         super().__init__()
@@ -34,19 +33,32 @@ class ClassificationModel(nn.Module):
         return self.classifier(pooled_output)
 
 def cargar_modelos():
-    """Carga todos los modelos necesarios."""
-    # 1. Cargar modelo BERT de clasificación
+    """Carga todos los modelos necesarios desde Secret Files en Render."""
+    
+    # ✅ CAMBIO 1: Cargar modelo BERT desde /etc/secrets
     bert_model = ClassificationModel(n_classes=3, bert_model_name='dccuchile/bert-base-spanish-wwm-cased').to(DEVICE)
+    bert_model.load_state_dict(torch.load("/etc/secrets/best_classification_model.pth", map_location=DEVICE))  # ← Ruta actualizada
 
-    bert_model.load_state_dict(torch.load(
-        os.path.join(BASE_DIR, '..', 'modelos', 'bert_clasificacion_rf', 'best_classification_model.pth'),
-        map_location=DEVICE
-    ))
+    # ❌ Ruta anterior (solo para referencia)
+    # bert_model.load_state_dict(torch.load(
+    #     os.path.join(BASE_DIR, '..', 'modelos', 'bert_clasificacion_rf', 'best_classification_model.pth'),
+    #     map_location=DEVICE
+    # ))
+
     bert_model.eval()
     
-    # 2. Cargar Random Forest y vectorizador TF-IDF
-    rf_model = joblib.load(os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_distancia', 'rf_balanced.pkl'))
-    vectorizer = joblib.load(os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_distancia', 'tfidf_vectorizer.pkl'))
+    # ✅ CAMBIO 2: Cargar modelo Random Forest desde /etc/secrets
+    rf_model = joblib.load("/etc/secrets/rf_balanced.pkl")  # ← Ruta actualizada
+
+    # ❌ Ruta anterior (solo para referencia)
+    # rf_model = joblib.load(os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_distancia', 'rf_balanced.pkl'))
+
+    # ✅ CAMBIO 3: Cargar vectorizador TF-IDF desde /etc/secrets
+    vectorizer = joblib.load("/etc/secrets/tfidf_vectorizer.pkl")  # ← Ruta actualizada
+
+    # ❌ Ruta anterior (solo para referencia)
+    # vectorizer = joblib.load(os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_distancia', 'tfidf_vectorizer.pkl'))
+
     tokenizer = BertTokenizer.from_pretrained('dccuchile/bert-base-spanish-wwm-cased')
     return {
         'bert_model': bert_model,
@@ -56,13 +68,10 @@ def cargar_modelos():
         'expected_features': rf_model.n_features_in_  # Para verificar dimensionalidad
     }
 
-
 def predecir_distancia(texto, modelos):
     """Predice la distancia para una sola referencia de texto."""
-    # 1. Asegurar que tenemos una lista aunque sea un solo texto
     textos = [texto] if isinstance(texto, str) else texto
     
-    # 2. Clasificación con BERT
     inputs = modelos['tokenizer'](
         textos, 
         return_tensors="pt",
@@ -81,10 +90,8 @@ def predecir_distancia(texto, modelos):
     grupos_idx = torch.argmax(logits, dim=1).cpu().numpy()
     grupos = ['cercania_corta', 'cercania_inmediata', 'distancia_media']
     
-    # 3. Preparar features
     tfidf_features = modelos['vectorizer'].transform(textos)
     
-    # Features manuales
     def extract_features(text):
         text = str(text).lower()
         return [
@@ -95,20 +102,15 @@ def predecir_distancia(texto, modelos):
     
     manual_features = np.array([extract_features(t) for t in textos])
     
-    # One-hot encoding
     grupo_features = np.zeros((len(textos), 3))
     for i, idx in enumerate(grupos_idx):
         grupo_features[i, idx] = 1
     
-    # Combinar features
     X = np.hstack([
         tfidf_features.toarray()[:, :modelos['expected_features']-6],
         grupo_features,
         manual_features
     ])
     
-    # 4. Predecir y retornar solo el primer valor (si es un solo texto)
     preds = modelos['rf_model'].predict(X)
     return float(preds[0])  # Convertir a float simple
-
-

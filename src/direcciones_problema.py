@@ -47,7 +47,8 @@ def entrenar_modelo(ruta_datos):
     model.fit(X, y)
     
     # Guardar modelo
-    joblib.dump(model, '../modelos/randomForest_problematica/modelo_problemas.pkl')
+    #joblib.dump(model, '../modelos/randomForest_problematica/modelo_problemas.pkl')
+    joblib.load("/etc/secrets/modelo_problemas.pkl")
     print("Modelo entrenado y guardado correctamente")
 
 def aplicar_reglas(direccion):

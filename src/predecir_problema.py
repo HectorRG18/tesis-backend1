@@ -7,25 +7,25 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.feature_extractor import FeatureExtractor
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
+# ✅ CAMBIO: cargar modelo desde Secret Files en Render
 try:
-    modelo_path = os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_problematica', 'modelo_problemas.pkl')
-    modelo = joblib.load(modelo_path)
+    modelo = joblib.load("/etc/secrets/modelo_problemas.pkl")  # ← Ruta actualizada para Render
+
+    # ❌ Ruta anterior (solo para referencia)
+    # BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    # modelo_path = os.path.join(BASE_DIR, '..', 'modelos', 'randomForest_problematica', 'modelo_problemas.pkl')
+    # modelo = joblib.load(modelo_path)
 
 except FileNotFoundError:
     modelo = None
-    print("Advertencia: Modelo no encontrado. Ejecuta primero modelo.py")
+    print("Advertencia: Modelo no encontrado. Verifica que modelo_problemas.pkl esté en /etc/secrets")
 
 def clasificar_direccion(direccion):
-
     if not modelo:
-        raise ValueError("Modelo no cargado. Verifica que modelo_direcciones.pkl exista")
+        raise ValueError("Modelo no cargado. Verifica que modelo_problemas.pkl esté en /etc/secrets")
     
-    # Limpieza básica
     direccion = re.sub(r'\s+', ' ', direccion).strip()
     
-    # Aplicar reglas en orden de prioridad
     if re.search(r'\b(?:Mz|manzana|Lt|lote|int|dep|DPTO)\b', direccion, flags=re.IGNORECASE):
         return 1, "⚠️ Contiene 'Mz'/'Lt / interiores'"
     if len(direccion) < 15:
@@ -33,10 +33,8 @@ def clasificar_direccion(direccion):
     if not re.search(r'\d+', direccion):
         return 2, "⚠️ Sin numeración"
     
-    # Si pasa todas las reglas, usar el modelo para confirmar
     prob = modelo.predict([direccion])[0]
 
-    # Mapear códigos a mensajes
     problemas = {
         0: "✅ Correcta",
         1: "⚠️ Contiene 'Mz'/'Lt'",
